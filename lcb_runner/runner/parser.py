@@ -46,6 +46,35 @@ def get_args():
         action="store_true",
         help="whether to use CoT in code execution scenario",
     )
+    
+    # --- ADDED RL FLAG HERE ---
+    parser.add_argument(
+        "--use_rl",
+        action="store_true",
+        help="If specified, use Reinforcement Learning for the self-repair scenario."
+    )
+    
+    # Synthetic test generation parameters
+    parser.add_argument(
+        "--num_synthetic_tests",
+        type=int,
+        default=5,
+        help="Number of synthetic test cases to generate per problem (default: 5)"
+    )
+    parser.add_argument(
+        "--self_consistency_checks",
+        type=int,
+        default=3,
+        help="Number of self-consistency checks for synthetic test generation (default: 3)"
+    )
+    parser.add_argument(
+        "--min_test_confidence",
+        type=float,
+        default=0.5,
+        help="Minimum confidence threshold for synthetic tests (default: 0.5)"
+    )
+    # --- END OF ADDED FLAG ---
+
     parser.add_argument(
         "--n", type=int, default=10, help="Number of samples to generate"
     )
@@ -62,6 +91,7 @@ def get_args():
     parser.add_argument(
         "--max_tokens", type=int, default=2000, help="Max tokens for sampling"
     )
+    # ... (rest of the arguments remain the same)
     parser.add_argument(
         "--multiprocess",
         default=0,
