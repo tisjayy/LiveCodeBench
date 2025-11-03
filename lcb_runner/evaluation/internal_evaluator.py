@@ -71,6 +71,14 @@ class InternalEvaluator:
                     "metadata": test_metadata
                 })
                 
+                # Debug logging
+                if not passed:
+                    print(f"Test {idx} FAILED - Input: {repr(str(test_case.input_val)[:50])}, Expected: {repr(test_case.expected_output)}, Actual: {repr(test_metadata.get('actual', 'N/A'))}")
+                    if 'error' in test_metadata:
+                        print(f"  Error: {test_metadata['error']}")
+                else:
+                    print(f"Test {idx} PASSED - Category: {test_case.category}")
+                
                 if test_metadata.get("timeout"):
                     metadata["timeouts"] += 1
                 if "execution_time" in test_metadata:
@@ -102,22 +110,23 @@ class InternalEvaluator:
                 temp_file = f.name
             
             try:
-                # Prepare input - if it's already a string, use it directly
-                # Otherwise, try to convert to string
+                # Prepare input - ensure it's properly formatted
                 if isinstance(test.input_val, str):
                     input_data = test.input_val
                 elif isinstance(test.input_val, dict):
                     # If it's a dict, try to extract the actual input
-                    # This handles cases where the LLM might return structured data
                     if "input" in test.input_val:
                         input_data = test.input_val["input"]
                     else:
-                        # Fall back to converting the whole dict to JSON
-                        input_data = json.dumps(test.input_val)
+                        # Fall back to converting the whole dict to string representation
+                        input_data = str(test.input_val)
                 else:
-                    # For other types (list, etc.), convert to JSON string
-                    input_data = json.dumps(test.input_val)
+                    # For other types (list, etc.), convert to string
+                    input_data = str(test.input_val)
                 
+                # Ensure input ends with newline if it doesn't already
+                if input_data and not input_data.endswith('\n'):
+                    input_data += '\n'
                 
                 # Run with timeout
                 start_time = time.time()
@@ -142,10 +151,12 @@ class InternalEvaluator:
                         return False, {
                             "error": error_msg[:200],  # Truncate long errors
                             "error_code": -4,
-                            "execution_time": execution_time
+                            "execution_time": execution_time,
+                            "input_used": input_data,
+                            "stderr": stderr
                         }
                     
-                    # Normalize stdout: strip trailing spaces/newlines
+                    # Normalize stdout: strip trailing spaces/newlines but preserve structure
                     actual_output = stdout.rstrip('\n\r ').strip()
                     expected_output = str(test.expected_output).strip()
                     
@@ -156,7 +167,8 @@ class InternalEvaluator:
                         "actual": actual_output,
                         "expected": expected_output,
                         "execution_time": execution_time,
-                        "confidence": test.confidence
+                        "confidence": test.confidence,
+                        "input_used": input_data
                     }
                 
                 except subprocess.TimeoutExpired:
@@ -164,7 +176,8 @@ class InternalEvaluator:
                     return False, {
                         "timeout": True,
                         "error_code": -3,
-                        "error": "Time limit exceeded"
+                        "error": "Time limit exceeded",
+                        "input_used": input_data
                     }
             
             finally:
@@ -179,19 +192,139 @@ class InternalEvaluator:
     def _evaluate_call_based(self, code: str, test: TestCase) -> Tuple[bool, Dict[str, Any]]:
         """Evaluate call-based code against a test case."""
         import time
+        import re
         
         try:
-            # Extract function name from test (would need metadata)
-            # For now, assume "solution" or try to extract
+            # Extract function/method name and check if it's inside a class
+            func_name = None
+            class_name = None
+            
+            lines = code.split('\n')
+            for i, line in enumerate(lines):
+                # Check for class definition
+                class_match = re.match(r'\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)', line)
+                if class_match:
+                    class_name = class_match.group(1)
+                
+                # Check for function/method definition
+                func_match = re.match(r'\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', line)
+                if func_match:
+                    func_name = func_match.group(1)
+                    # If we found a method inside a class, we're done
+                    if class_name:
+                        break
+            
+            if not func_name:
+                return False, {
+                    "error": "Could not find function definition in code",
+                    "error_code": -5
+                }
             
             # Create test wrapper
-            test_wrapper = f"""
+            # Call-based inputs are always parsed as JSON strings (see grade_call_based in testing_util.py)
+            # We need to handle the input correctly based on whether it's already a list/dict or a JSON string
+            if isinstance(test.input_val, dict) or isinstance(test.input_val, list):
+                # Already a structured object, convert to JSON and then parse
+                input_json_str = json.dumps(test.input_val)
+                
+                # If function is inside a class, instantiate it first
+                if class_name:
+                    test_wrapper = f"""
 {code}
 
 # Test execution
 import json
-input_data = json.loads('{json.dumps(test.input_val)}')
-result = solution(input_data) if 'solution' in dir() else None
+
+input_data = json.loads('{input_json_str}')
+obj = {class_name}()
+result = obj.{func_name}(*input_data) if isinstance(input_data, list) else obj.{func_name}(input_data)
+print(json.dumps(result))
+"""
+                else:
+                    test_wrapper = f"""
+{code}
+
+# Test execution
+import json
+
+input_data = json.loads('{input_json_str}')
+result = {func_name}(*input_data) if isinstance(input_data, list) else {func_name}(input_data)
+print(json.dumps(result))
+"""
+            elif isinstance(test.input_val, str):
+                # Could be a JSON string or raw string
+                try:
+                    # Try to parse as JSON first
+                    parsed = json.loads(test.input_val)
+                    if isinstance(parsed, list):
+                        if class_name:
+                            test_wrapper = f"""
+{code}
+
+# Test execution
+import json
+
+input_data = json.loads({repr(test.input_val)})
+obj = {class_name}()
+result = obj.{func_name}(*input_data)
+print(json.dumps(result))
+"""
+                        else:
+                            test_wrapper = f"""
+{code}
+
+# Test execution
+import json
+
+input_data = json.loads({repr(test.input_val)})
+result = {func_name}(*input_data)
+print(json.dumps(result))
+"""
+                    else:
+                        if class_name:
+                            test_wrapper = f"""
+{code}
+
+# Test execution
+import json
+input_data = json.loads({repr(test.input_val)})
+obj = {class_name}()
+result = obj.{func_name}(input_data)
+print(json.dumps(result))
+"""
+                        else:
+                            test_wrapper = f"""
+{code}
+
+# Test execution
+import json
+input_data = json.loads({repr(test.input_val)})
+result = {func_name}(input_data)
+print(json.dumps(result))
+"""
+                except json.JSONDecodeError:
+                    # Not valid JSON, reject this test input as malformed
+                    return False, {
+                        "error": "Input is not valid JSON for call_based function",
+                        "error_code": -4
+                    }
+            else:
+                # Other types (int, float, etc.) - treat as single argument
+                if class_name:
+                    test_wrapper = f"""
+{code}
+
+# Test execution
+obj = {class_name}()
+result = obj.{func_name}({repr(test.input_val)})
+print(json.dumps(result))
+"""
+                else:
+                    test_wrapper = f"""
+{code}
+
+# Test execution
+result = {func_name}({repr(test.input_val)})
 print(json.dumps(result))
 """
             
@@ -269,6 +402,9 @@ print(json.dumps(result))
         actual_str = str(actual).strip().rstrip('\n\r ')
         expected_str = str(expected).strip().rstrip('\n\r ')
         
+        if actual_str == expected_str:
+            return True
+        
         # Try JSON comparison
         try:
             actual_json = json.loads(actual_str)
@@ -285,18 +421,43 @@ print(json.dumps(result))
         except (ValueError, TypeError):
             pass
         
-        # Normalize whitespace and simple list formatting
-        def normalize_string(s: str) -> str:
-            # Remove trailing newlines and spaces
-            s = s.rstrip('\n\r ')
-            # Collapse multiple spaces/newlines to single space
-            import re
-            s = re.sub(r'\s+', ' ', s)
-            # Normalize simple list formats (remove spaces after commas)
-            s = s.replace(', ', ',')
-            return s
+        # For multi-line outputs, compare line by line
+        actual_lines = actual_str.split('\n')
+        expected_lines = expected_str.split('\n')
         
-        return normalize_string(actual_str) == normalize_string(expected_str)
+        if len(actual_lines) == len(expected_lines):
+            all_match = True
+            for a_line, e_line in zip(actual_lines, expected_lines):
+                a_line = a_line.strip()
+                e_line = e_line.strip()
+                
+                # Try numeric comparison per line
+                try:
+                    if abs(float(a_line) - float(e_line)) > float_tol:
+                        all_match = False
+                        break
+                except (ValueError, TypeError):
+                    # String comparison with normalization
+                    if self._normalize_string(a_line) != self._normalize_string(e_line):
+                        all_match = False
+                        break
+            
+            if all_match:
+                return True
+        
+        # Fallback to normalized string comparison
+        return self._normalize_string(actual_str) == self._normalize_string(expected_str)
+    
+    def _normalize_string(self, s: str) -> str:
+        """Normalize string for comparison."""
+        # Remove trailing newlines and spaces
+        s = s.rstrip('\n\r ')
+        # Collapse multiple spaces/newlines to single space
+        import re
+        s = re.sub(r'\s+', ' ', s)
+        # Normalize simple list formats (remove spaces after commas)
+        s = s.replace(', ', ',')
+        return s
 
 
 def compute_weighted_reward(

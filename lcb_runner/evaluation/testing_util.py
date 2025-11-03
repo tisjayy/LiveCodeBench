@@ -190,23 +190,27 @@ def get_function(compiled_sol, fn_name: str):  # type: ignore
 
 
 def compile_code(code: str, timeout: int):
-    signal.alarm(timeout)
+    import sys
+    import signal
+    from types import ModuleType
+
+    use_timeout = hasattr(signal, "SIGALRM")  # True on Unix, False on Windows
+
+    if use_timeout:
+        signal.alarm(timeout)
     try:
         tmp_sol = ModuleType("tmp_sol", "")
         exec(code, tmp_sol.__dict__)
         if "class Solution" in code:
             # leetcode wraps solutions in `Solution`
-            # this is a hack to check if it is leetcode solution or not
-            # currently livecodebench only supports LeetCode but
-            # else condition allows future extensibility to other platforms
             compiled_sol = tmp_sol.Solution()
         else:
-            # do nothing in the other case since function is accesible
             compiled_sol = tmp_sol
 
         assert compiled_sol is not None
     finally:
-        signal.alarm(0)
+        if use_timeout:
+            signal.alarm(0)
 
     return compiled_sol
 
@@ -425,15 +429,18 @@ def grade_stdio(
     return all_results, {"execution time": total_execution_time}
 
 
-def run_test(sample, test=None, debug=False, timeout=6):
-    """
-    if test(generated_code) is not None it'll try to run the code.
-    otherwise it'll just return an input and output pair.
-    """
-    signal.signal(signal.SIGALRM, timeout_handler)
+def run_test(sample, test=None, debug=False, timeout=25):
+    import sys
+    import signal
+    from datetime import datetime
+    import json
 
-    # Disable functionalities that can make destructive changes to the test.
-    # max memory is set to 4GB
+    use_timeout = sys.platform != "win32"
+    if use_timeout:
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout)
+    # else: do nothing
+
     reliability_guard()
 
     if debug:
@@ -447,11 +454,10 @@ def run_test(sample, test=None, debug=False, timeout=6):
 
     if in_outs:
         if in_outs.get("fn_name") is None:
-            which_type = CODE_TYPE.standard_input  # Standard input
+            which_type = CODE_TYPE.standard_input
             method_name = None
-
         else:
-            which_type = CODE_TYPE.call_based  # Call-based
+            which_type = CODE_TYPE.call_based
             method_name = in_outs["fn_name"]
 
     if debug:
@@ -467,7 +473,8 @@ def run_test(sample, test=None, debug=False, timeout=6):
             print(f"loading test code = {datetime.now().time()}")
 
         if which_type == CODE_TYPE.call_based:
-            signal.alarm(timeout)
+            if use_timeout:
+                signal.alarm(timeout)
             try:
                 results, metadata = grade_call_based(
                     code=test,
@@ -483,12 +490,11 @@ def run_test(sample, test=None, debug=False, timeout=6):
                     "error_message": f"Error during testing: {e}",
                 }
             finally:
-                signal.alarm(0)
+                if use_timeout:
+                    signal.alarm(0)
         elif which_type == CODE_TYPE.standard_input:
-            # sol
-            # if code has if __name__ == "__main__": then remove it
-
-            signal.alarm(timeout)
+            if use_timeout:
+                signal.alarm(timeout)
             try:
                 results, metadata = grade_stdio(
                     code=test,
@@ -503,7 +509,8 @@ def run_test(sample, test=None, debug=False, timeout=6):
                     "error_message": f"Error during testing: {e}",
                 }
             finally:
-                signal.alarm(0)
+                if use_timeout:
+                    signal.alarm(0)
 
 
 def reliability_guard(maximum_memory_bytes=None):

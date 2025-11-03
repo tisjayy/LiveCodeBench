@@ -1,6 +1,6 @@
 """ Utilities for running functions in parallel processes. """
 import sys
-import resource
+#import resource
 import multiprocessing as mp
 import queue
 import traceback
@@ -91,8 +91,8 @@ class TaskResult:
 
 def initializer(limit):
     """Set maximum amount of memory each worker process can allocate."""
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
+    #soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    #resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
 
 
 def run_tasks_in_parallel_iter(

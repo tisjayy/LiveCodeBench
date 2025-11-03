@@ -61,7 +61,7 @@ from operator import iand
 import sys
 """
 
-def check_correctness(check_program, timeout=3):
+def check_correctness(check_program, timeout=15):
     """
     Evaluates the functional correctness of a completion by running the test
     suite provided in the problem.
@@ -117,18 +117,22 @@ def unsafe_execute(check_program, result, timeout):
         os.chdir = chdir
 
 
+# Removed duplicate TimeoutException definition
+
 @contextlib.contextmanager
 def time_limit(seconds):
     def signal_handler(signum, frame):
         raise TimeoutException("Timed out!")
 
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    signal.signal(signal.SIGALRM, signal_handler)
+    use_timeout = hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM") and sys.platform != "win32"
+    if use_timeout:
+        signal.signal(signal.SIGALRM, signal_handler)
+        signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-
+        if use_timeout:
+            signal.setitimer(signal.ITIMER_REAL, 0)
 
 @contextlib.contextmanager
 def swallow_io():

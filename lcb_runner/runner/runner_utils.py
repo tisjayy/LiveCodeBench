@@ -1,7 +1,20 @@
 from lcb_runner.lm_styles import LMStyle, LanguageModel
+from lcb_runner.utils.scenarios import Scenario
 
+# --- 1. Import our custom RL runner ---
+from lcb_runner.runner.rl_self_repair_runner import RLSelfRepairRunner
 
 def build_runner(args, model: LanguageModel):
+    # --- 2. Add the RL runner selection logic at the top ---
+    if args.scenario == Scenario.selfrepair and args.use_rl:
+        print("INFO: Building RL Self-Repair Runner...")
+        # If the scenario is selfrepair AND --use_rl is active,
+        # return an instance of our custom runner. The rest of this function is skipped.
+        return RLSelfRepairRunner(args, model)
+    # --- End of new logic ---
+
+    # The original logic of this function remains unchanged.
+    # It will be executed if the condition above is false.
     if model.model_style == LMStyle.OpenAIChat:
         from lcb_runner.runner.oai_runner import OpenAIRunner
 

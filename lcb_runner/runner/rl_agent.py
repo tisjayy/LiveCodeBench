@@ -47,7 +47,9 @@ class RLAgent:
         Updates the policy network using REINFORCE.
         This is called at the end of an episode (all repair attempts for one problem).
         """
+        # If no actions were taken in the episode, there's nothing to update.
         if not self.log_probs:
+            self.clear_memory()  # Ensure memory is cleared even if no update happens
             return
 
         discounted_rewards = []
@@ -55,6 +57,11 @@ class RLAgent:
         for reward in reversed(self.rewards):
             cumulative_reward = reward + self.gamma * cumulative_reward
             discounted_rewards.insert(0, cumulative_reward)
+        
+        # Safety check: if no rewards, nothing to do
+        if not discounted_rewards:
+            self.clear_memory()
+            return
             
         discounted_rewards = torch.tensor(discounted_rewards, device=self.device)
         # Normalize for stability
@@ -66,6 +73,11 @@ class RLAgent:
         policy_loss = []
         for log_prob, reward in zip(self.log_probs, discounted_rewards):
             policy_loss.append(-log_prob * reward)
+
+        # Extra safety check: ensure we have loss tensors before stacking
+        if not policy_loss:
+            self.clear_memory()
+            return
 
         self.optimizer.zero_grad()
         loss = torch.stack(policy_loss).sum()

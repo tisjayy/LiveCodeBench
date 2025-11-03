@@ -56,14 +56,16 @@ class CodeGenerationProblem:
     def __post_init__(self):
         self.platform = Platform(self.platform)
         self.difficulty = Difficulty(self.difficulty)
-        self.contest_date = datetime.fromisoformat(self.contest_date)
+        # Only convert if contest_date is a string
+        if isinstance(self.contest_date, str):
+            self.contest_date = datetime.fromisoformat(self.contest_date)
 
         self.public_test_cases = json.loads(self.public_test_cases)  # type: ignore
         self.public_test_cases = [Test(**t) for t in self.public_test_cases]
 
         try:
             self.private_test_cases = json.loads(self.private_test_cases)  # type: ignore
-        except:
+        except Exception:
             self.private_test_cases = json.loads(
                 pickle.loads(
                     zlib.decompress(
@@ -121,9 +123,22 @@ class CodeGenerationProblem:
         }
 
 
-def load_code_generation_dataset(release_version="release_v1", start_date=None, end_date=None) -> list[CodeGenerationProblem]:
-    dataset = load_dataset("livecodebench/code_generation_lite", split="test", version_tag=release_version, trust_remote_code=True)
+def load_code_generation_dataset(release_version="release_v1", start_date=None, end_date=None) -> list["CodeGenerationProblem"]:
+    # List all your local .jsonl files here
+    data_files = {
+    "test": [
+        "/mnt/c/Users/2594j/Downloads/test.jsonl",
+        "/mnt/c/Users/2594j/Downloads/test2.jsonl",
+        "/mnt/c/Users/2594j/Downloads/test3.jsonl",
+        "/mnt/c/Users/2594j/Downloads/test4.jsonl",
+        "/mnt/c/Users/2594j/Downloads/test5.jsonl",
+        "/mnt/c/Users/2594j/Downloads/test6.jsonl",
+    ]
+    }
+    dataset = load_dataset("json", data_files=data_files, split="test")
+    dataset = dataset.select(range(100))  # Use only the first 100 problems
     dataset = [CodeGenerationProblem(**p) for p in dataset]  # type: ignore
+
     if start_date is not None:
         p_start_date = datetime.strptime(start_date, "%Y-%m-%d")
         dataset = [e for e in dataset if p_start_date <= e.contest_date]

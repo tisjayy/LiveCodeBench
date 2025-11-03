@@ -59,16 +59,17 @@ class SyntheticTestGenerator:
         raw_tests = self._generate_concrete_tests(question, plan_raw, num_tests, code_type)
         
         if progress_bar:
-            progress_bar.set_description(f"Validated tests...")
-        validated_tests = self._validate_with_self_consistency(
+            progress_bar.set_description("Validating tests with self-consistency...")
+        
+        test_cases = self._validate_with_self_consistency(
             question, raw_tests, self_consistency_checks, code_type, min_confidence
         )
         
         if progress_bar:
-            progress_bar.set_description(f"Generated {len(validated_tests)}/{len(raw_tests)} validated tests")
+            progress_bar.set_description(f"Validated {len(test_cases)} tests")
             progress_bar.update(1)
         
-        return validated_tests
+        return test_cases
 
     # ---------- LLM calls ----------
 
@@ -132,6 +133,7 @@ Provide the test plan in JSON format with fields: category, intent, example_inpu
         num_tests: int,
         code_type: str
     ) -> List[Dict[str, Any]]:
+        # Use f-string directly - the doubled braces {{}} will be rendered as single braces in the output
         prompt = f"""Based on this test plan, instantiate concrete (input, expected output) pairs.
 Compute the expected outputs exactly. If non-trivial, show the minimal reasoning steps.
 
@@ -143,31 +145,51 @@ Test Plan:
 
 Generate {num_tests} diverse test cases covering all categories.
 
+For stdin problems, the input should be formatted exactly as it would appear in stdin (including newlines).
+For function-based problems, the input should be a valid JSON array or object representing the function parameters.
+
 Provide as a JSON array with objects containing:
 - category: basic/boundary/edge/adversarial
-- input: the input value (as string or JSON)
-- expected: the expected output (as string or JSON)
+- input: the input value (for stdin problems, include ALL lines including test count)
+- expected: the expected output (as string, exactly as it should be printed)
 - rationale: brief explanation
 
 Code type: {code_type}
 
-IMPORTANT: Return ONLY a valid JSON array, no markdown, no code blocks, no extra text.
-Example format:
+IMPORTANT: Return ONLY a valid JSON array, no markdown, no code blocks, no extra text."""
+
+        # Add code-type-specific examples
+        if code_type == "stdin":
+            prompt += """
+Example format for stdin:
 [
-  {{"category": "basic", "input": "test", "expected": "result", "rationale": "..."}},
-  {{"category": "boundary", "input": "edge", "expected": "output", "rationale": "..."}}
+  {{"category": "basic", "input": "1\\n3 2\\nBWB", "expected": "1", "rationale": "Single test case"}},
+  {{"category": "boundary", "input": "1\\n5 5\\nBBBBB", "expected": "1", "rationale": "All black cells"}}
+]"""
+        else:  # call_based
+            prompt += """
+Example format for call_based:
+[
+  {{"category": "basic", "input": "[\\\"abcac\\\", 2]", "expected": "1", "rationale": "Basic case with two args"}},
+  {{"category": "boundary", "input": "{{\\\"s1\\\": \\\"abcd\\\", \\\"s2\\\": \\\"abcd\\\"}}", "expected": "true", "rationale": "Equal strings"}}
 ]
-"""
+For call_based, input must be valid JSON (array for multiple args, object for single dict arg)."""
+
+        prompt = f"{prompt}\n"
         response = self._llm_respond(
             user_content=prompt,
             system_content="You are an expert at computing exact expected outputs for test cases. Return ONLY JSON, no other text."
         )
         
+        # Log the raw response for debugging
+        logging.info(f"LLM response for test generation (first 500 chars): {response[:500]}")
+        
         tests = self._parse_json_array(response)
         if not tests:
-            logging.info(f"Failed to parse JSON, attempting manual extraction...")
-            # Try to manually extract test-like structures
+            logging.warning(f"Failed to parse JSON, attempting manual extraction...")
             tests = self._manual_extract_tests(response)
+        
+        logging.info(f"Parsed {len(tests)} test objects from LLM response")
             
         if not tests:
             logging.warning("All parsing attempts failed. Falling back to a minimal test.")
@@ -180,19 +202,57 @@ Example format:
 
         # Validate and coerce
         valid = []
-        for t in tests:
+        for i, t in enumerate(tests):
             cat = str(t.get("category", "basic")).lower()
             if cat not in CATEGORIES:
                 cat = "basic"
             if "input" not in t or "expected" not in t:
+                logging.warning(f"Test {i} missing input or expected: {t}")
                 continue
+
+            # Clean up input and expected values - AGGRESSIVE cleaning
+            input_val = t["input"]
+            if isinstance(input_val, str):
+                # Strip whitespace, then trailing commas, then quotes
+                cleaned = input_val.strip().rstrip(',').strip()
+                # Remove outer quotes (both single and double)
+                while (cleaned.startswith('"') and cleaned.endswith('"')) or \
+                      (cleaned.startswith("'") and cleaned.endswith("'")):
+                    cleaned = cleaned[1:-1].strip()
+                
+                # Unescape sequences like \n to actual newlines
+                try:
+                    input_val = bytes(cleaned, "utf-8").decode("unicode_escape")
+                except (UnicodeDecodeError, AttributeError):
+                    input_val = cleaned
+            
+            expected_val = t["expected"]
+            if isinstance(expected_val, str):
+                cleaned = expected_val.strip().rstrip(',').strip()
+                # Remove outer quotes
+                while (cleaned.startswith('"') and cleaned.endswith('"')) or \
+                      (cleaned.startswith("'") and cleaned.endswith("'")):
+                    cleaned = cleaned[1:-1].strip()
+                expected_val = cleaned
+
+            # Reject malformed inputs with code-like syntax
+            if isinstance(input_val, str):
+                code_patterns = [".repeat(", ".join(", ' + "', '") + "', '" + "']
+                if any(pattern in input_val for pattern in code_patterns):
+                    logging.warning(f"Test {i} rejected: input contains code-like syntax: {repr(input_val[:50])}")
+                    continue
+
             valid.append({
                 "category": cat,
-                "input": t["input"],
-                "expected": t["expected"],
+                "input": input_val,
+                "expected": expected_val,
                 "rationale": t.get("rationale", "")
             })
         print(f"Generated {len(valid)} concrete tests")
+        if len(valid) > 0:
+            # Ensure input is a string before slicing for the log
+            input_for_log = str(valid[0]['input'])
+            print(f"Sample test - Input: {repr(input_for_log[:100])}, Expected: {repr(valid[0]['expected'])}")
         return valid
 
     # ---------- Self-consistency ----------
@@ -210,6 +270,7 @@ Example format:
             baseline, confidence = self._compute_expected_with_consistency(
                 question, test["input"], num_checks, code_type
             )
+            print(f"Test {idx}: confidence={confidence:.2f}, baseline='{baseline}', original_expected='{test.get('expected', 'N/A')}'")
             if confidence >= min_confidence:
                 validated.append(TestCase(
                     input_val=test["input"],
@@ -219,6 +280,8 @@ Example format:
                     category=test.get("category", "basic"),
                     rationale=test.get("rationale", "")
                 ))
+            else:
+                print(f"Test {idx} rejected due to low confidence ({confidence:.2f} < {min_confidence})")
         print(f"Validated {len(validated)}/{len(raw_tests)} tests")
         return validated
 
@@ -229,8 +292,11 @@ Example format:
         num_checks: int,
         code_type: str
     ) -> Tuple[Any, float]:
+        import threading
+        
         outputs: List[str] = []
-        for _ in range(max(1, num_checks)):
+        
+        for check_idx in range(max(1, num_checks)):
             prompt = f"""Given this problem:
 {question}
 
@@ -242,16 +308,78 @@ Code type: {code_type}
 
 Only return the expected output as a single value (no extra text).
 """
-            out = self._llm_respond(
-                user_content=prompt,
-                system_content="You are an expert at computing exact expected outputs."
-            )
-            outputs.append(self._strip_fences(out).strip())
+            
+            # Use threading to implement timeout (works on Windows)
+            result = [None]
+            exception = [None]
+            
+            def llm_call():
+                try:
+                    result[0] = self._llm_respond(
+                        user_content=prompt,
+                        system_content="You are an expert at computing exact expected outputs."
+                    )
+                except Exception as e:
+                    exception[0] = e
+            
+            thread = threading.Thread(target=llm_call)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=180)  # 3 minute timeout
+            
+            if thread.is_alive():
+                logging.warning(f"Self-consistency check {check_idx+1}/{num_checks} timed out (180s)")
+                outputs.append("")  # Empty output = no agreement
+            elif exception[0]:
+                logging.warning(f"Self-consistency check {check_idx+1}/{num_checks} failed: {exception[0]}")
+                outputs.append("")
+            elif result[0]:
+                outputs.append(self._strip_fences(result[0]).strip())
+            else:
+                outputs.append("")
 
-        baseline = outputs[0]
-        agree = sum(1 for o in outputs[1:] if self._outputs_match(baseline, o))
+        # Extract final answer if LLM included reasoning
+        baseline = self._extract_final_answer(outputs[0])
+        
+        # If baseline is empty, it means all checks failed/timed out - return 0 confidence
+        if not baseline or baseline == "":
+            return "", 0.0
+        
+        other_extracted = [self._extract_final_answer(o) for o in outputs[1:]]
+        agree = sum(1 for o in other_extracted if self._outputs_match(baseline, o))
         confidence = (agree + 1) / max(1, num_checks)
         return baseline, confidence
+    
+    def _extract_final_answer(self, text: str) -> str:
+        """
+        Extract the final numeric answer from LLM output that may include reasoning.
+        Tries multiple heuristics to find the actual answer.
+        """
+        text = text.strip()
+        
+        # Try to find patterns like "Final answer: 2", "Answer: 2", "result is 2", etc.
+        # Look for numeric patterns after common keywords
+        patterns = [
+            r'(?:final\s*answer|answer|result)\s*[:\-]?\s*(\d+)',
+            r'(?:^|\n)\s*(\d+)\s*(?:\n|$)',
+            r'=?\s*(\d+)\s*$'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        
+        # If no pattern found, try to extract the last standalone number on its own line
+        lines = text.split('\n')
+        for line in reversed(lines):
+            line = line.strip()
+            # Look for lines that are mostly just a number
+            if re.match(r'^\d+\.?\s*$', line):
+                return line.strip('.')
+        
+        # Last resort: return the whole text (may have reasoning, but that's what we got)
+        return text
 
     # ---------- Utilities ----------
 
@@ -296,8 +424,7 @@ Only return the expected output as a single value (no extra text).
             except json.JSONDecodeError:
                 pass
         
-        # Try to fix common issues
-        # Remove trailing commas
+        # Try to fix common issues - trailing commas
         fixed = re.sub(r',\s*}', '}', candidate)
         fixed = re.sub(r',\s*]', ']', fixed)
         
@@ -307,6 +434,17 @@ Only return the expected output as a single value (no extra text).
                 return obj
         except json.JSONDecodeError:
             pass
+
+        # Last resort: try demjson3 for lenient parsing
+        try:
+            import demjson3
+            obj = demjson3.decode(candidate)
+            if isinstance(obj, dict) and "tests" in obj and isinstance(obj["tests"], list):
+                return obj["tests"]
+            if isinstance(obj, list):
+                return obj
+        except Exception as e:
+            logging.debug(f"demjson3 parsing failed: {e}")
 
         return []
     

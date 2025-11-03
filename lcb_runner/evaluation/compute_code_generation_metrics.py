@@ -39,17 +39,34 @@ def check_correctness(sample, generation, timeout, debug=True):
         args=(sample, generation, debug, result, metadata_list, timeout),
     )
     p.start()
-    p.join(
-        timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5
-    )
+    
+    # Calculate timeout - need to handle potential JSON parsing errors
+    try:
+        in_outs = json.loads(sample["input_output"])
+        num_inputs = len(in_outs["inputs"])
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        # Fallback to a reasonable timeout if we can't parse the test count
+        if debug:
+            print(f"Warning: Could not parse input_output to determine test count: {e}")
+        num_inputs = 10  # reasonable default
+    
+    p.join(timeout=(timeout + 1) * num_inputs + 5)
     if p.is_alive():
         p.kill()
     if not result:
-        in_outs = json.loads(sample["input_output"])
+        # Re-parse for the timeout case (might have different error state)
+        try:
+            in_outs = json.loads(sample["input_output"])
+            num_inputs = len(in_outs["inputs"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            num_inputs = 1  # Fallback to single test
         # consider that all tests failed
-        result = [[-1 for i in range(len(in_outs["inputs"]))]]
+        result = [[-1 for i in range(num_inputs)]]
         if debug:
             print(f"global timeout")
+    if not metadata_list:
+        # If metadata is empty, create a basic one
+        metadata_list.append({"error": "No metadata returned from test process"})
     return result[0], metadata_list[0]
 
 
@@ -63,6 +80,7 @@ def evaluate_generations_by_problem(args):
     metadata = []
     for o_idx, o in enumerate(problem_generations):
         curr_res = [-2]
+        curr_metadata = {}
         try:
             curr_res, curr_metadata = check_correctness(
                 sample, o, timeout=timeout, debug=debug
@@ -71,11 +89,8 @@ def evaluate_generations_by_problem(args):
                 print(f"\nSuccessful compilation of task {o_idx}!")
             fixed = []
             for e in curr_res:
-                if isinstance(e, np.ndarray):
-                    e = e.item(0)
-                if isinstance(e, np.bool_):
-                    e = bool(e)
-                fixed.append(e)
+                # Any result that is not explicitly True is considered a failure.
+                fixed.append(e is True)
             curr_res = fixed
             if not np.all(curr_res):
                 if debug:
@@ -83,16 +98,32 @@ def evaluate_generations_by_problem(args):
         except Exception as e:
             if debug:
                 print(f"Compilation failed, test framework exception = {repr(e)}{e}\n")
-            # break
+                import traceback
+                print(f"Full traceback for error:\n{traceback.format_exc()}")
+            # Try to determine the number of tests from the sample
+            try:
+                in_outs = json.loads(sample["input_output"])
+                num_tests = len(in_outs["inputs"])
+                curr_res = [False] * num_tests
+                if debug:
+                    print(f"Marking all {num_tests} tests as failed due to exception")
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # If we can't determine test count, mark as single failure
+                curr_res = [False]
+                if debug:
+                    print(f"Could not determine test count, marking as single failure")
             curr_metadata = {
                 "error": repr(e),
                 "error_code": -5,
                 "error_message": "TestRunnerError",
             }
         finally:
-            assert isinstance(curr_res, list), curr_res
+            # Ensure that any result that is not explicitly True is considered a failure.
+            # This is a safeguard against unexpected error codes.
+            boolean_res = [item is True for item in curr_res]
+            assert isinstance(boolean_res, list), boolean_res
             assert isinstance(curr_metadata, dict), curr_metadata
-            res.append(curr_res)
+            res.append(boolean_res)
             metadata.append(curr_metadata)
     if debug:
         for i, r in enumerate(problem_generations):
