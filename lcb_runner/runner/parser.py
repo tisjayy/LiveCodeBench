@@ -73,7 +73,6 @@ def get_args():
         default=0.5,
         help="Minimum confidence threshold for synthetic tests (default: 0.5)"
     )
-    # --- END OF ADDED FLAG ---
 
     parser.add_argument(
         "--n", type=int, default=10, help="Number of samples to generate"

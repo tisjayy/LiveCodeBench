@@ -223,8 +223,10 @@ class RLSelfRepairRunner:
                     current_metadata = {}
                     break
                 
-                # Update metadata for next iteration
-                if not all(new_synth_results):
+                # Update metadata for next iteration - always use BEST code so far
+                # We need to re-evaluate best_code to get its current failure metadata
+                if not all(new_synth_results) and passed_synth == best_synth_passed:
+                    # Current attempt equals best - use its metadata
                     try:
                         fail_index = new_synth_results.index(False)
                         failing_test = synthetic_tests[fail_index]
@@ -235,10 +237,27 @@ class RLSelfRepairRunner:
                         }
                     except (ValueError, IndexError, KeyError):
                         current_metadata = {}
+                elif best_synth_passed < len(synthetic_tests):
+                    # Best is from a previous attempt - re-evaluate to get fresh metadata
+                    best_synth_results, best_synth_metadata = self.internal_evaluator.evaluate_on_synthetic_tests(
+                        code=best_code, tests=synthetic_tests, code_type=code_type
+                    )
+                    try:
+                        fail_index = best_synth_results.index(False)
+                        failing_test = synthetic_tests[fail_index]
+                        failing_metadata = best_synth_metadata["test_results"][fail_index]
+                        current_metadata = {
+                            "inputs": failing_test.input_val, "actual": failing_metadata.get("actual", ""),
+                            "expected": failing_test.expected_output, "error_code": -2
+                        }
+                    except (ValueError, IndexError, KeyError):
+                        current_metadata = {}
 
-                current_code = repaired_code
+                # CRITICAL: Use best_code for next iteration, not last attempt's code
+                current_code = best_code
+                # Keep track of best results for reward computation
                 initial_synth_results = new_synth_results
-                current_synth_metadata = new_synth_metadata  # Update metadata for next iteration
+                current_synth_metadata = new_synth_metadata
             # --- End of RL Repair Loop ---
             
             # Use the best code found across all attempts

@@ -26,6 +26,7 @@ class TestCase:
     kind: str                       # "exact", "property", "approximate"
     category: str                   # one of CATEGORIES
     rationale: Optional[str] = None
+    original_index: Optional[int] = None  # Track original test index before filtering
 
 
 class SyntheticTestGenerator:
@@ -33,10 +34,11 @@ class SyntheticTestGenerator:
     Generates synthetic test cases from problem specifications.
     Uses LLM to create a test plan and concrete test I/O pairs with self-consistency checks.
     """
-    def __init__(self, model: LanguageModel, base_runner, deterministic_decoding: bool = True):
+    def __init__(self, model: LanguageModel, base_runner, deterministic_decoding: bool = True, timeout: int = 180):
         self.model = model
         self.base_runner = base_runner
         self.deterministic_decoding = deterministic_decoding  # e.g., temperature=0 inside base_runner if supported
+        self.timeout = timeout  # Timeout for self-consistency checks
 
     def generate_tests(
         self,
@@ -278,11 +280,13 @@ For call_based, input must be valid JSON (array for multiple args, object for si
                     confidence=confidence,
                     kind="exact",
                     category=test.get("category", "basic"),
-                    rationale=test.get("rationale", "")
+                    rationale=test.get("rationale", ""),
+                    original_index=idx
                 ))
             else:
                 print(f"Test {idx} rejected due to low confidence ({confidence:.2f} < {min_confidence})")
         print(f"Validated {len(validated)}/{len(raw_tests)} tests")
+        print(f"Validated test indices: {[t.original_index for t in validated]}")
         return validated
 
     def _compute_expected_with_consistency(
@@ -325,10 +329,10 @@ Only return the expected output as a single value (no extra text).
             thread = threading.Thread(target=llm_call)
             thread.daemon = True
             thread.start()
-            thread.join(timeout=180)  # 3 minute timeout
+            thread.join(timeout=self.timeout)
             
             if thread.is_alive():
-                logging.warning(f"Self-consistency check {check_idx+1}/{num_checks} timed out (180s)")
+                logging.warning(f"Self-consistency check {check_idx+1}/{num_checks} timed out ({self.timeout}s)")
                 outputs.append("")  # Empty output = no agreement
             elif exception[0]:
                 logging.warning(f"Self-consistency check {check_idx+1}/{num_checks} failed: {exception[0]}")

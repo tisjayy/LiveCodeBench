@@ -71,13 +71,14 @@ class InternalEvaluator:
                     "metadata": test_metadata
                 })
                 
-                # Debug logging
+                # Debug logging - use original_index if available to show which test from generation phase
+                test_label = test_case.original_index if hasattr(test_case, 'original_index') and test_case.original_index is not None else idx
                 if not passed:
-                    print(f"Test {idx} FAILED - Input: {repr(str(test_case.input_val)[:50])}, Expected: {repr(test_case.expected_output)}, Actual: {repr(test_metadata.get('actual', 'N/A'))}")
+                    print(f"Test {test_label} FAILED - Input: {repr(str(test_case.input_val)[:50])}, Expected: {repr(test_case.expected_output)}, Actual: {repr(test_metadata.get('actual', 'N/A'))}")
                     if 'error' in test_metadata:
                         print(f"  Error: {test_metadata['error']}")
                 else:
-                    print(f"Test {idx} PASSED - Category: {test_case.category}")
+                    print(f"Test {test_label} PASSED - Category: {test_case.category}")
                 
                 if test_metadata.get("timeout"):
                     metadata["timeouts"] += 1
@@ -104,6 +105,13 @@ class InternalEvaluator:
         import time
         
         try:
+            # Check if code is empty or invalid
+            if not code or code.strip() == "":
+                return False, {
+                    "error": "Code is empty or invalid",
+                    "error_code": -5
+                }
+            
             # Create a temporary Python file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
                 f.write(code)
@@ -195,6 +203,13 @@ class InternalEvaluator:
         import re
         
         try:
+            # Check if code is empty or invalid
+            if not code or code.strip() == "":
+                return False, {
+                    "error": "Code is empty or invalid",
+                    "error_code": -5
+                }
+            
             # Extract function/method name and check if it's inside a class
             func_name = None
             class_name = None
@@ -404,6 +419,10 @@ print(json.dumps(result))
         
         if actual_str == expected_str:
             return True
+        
+        # Handle boolean comparisons (Python True/False vs JSON true/false vs string "true"/"false")
+        if actual_str.lower() in ('true', 'false') and expected_str.lower() in ('true', 'false'):
+            return actual_str.lower() == expected_str.lower()
         
         # Try JSON comparison
         try:
