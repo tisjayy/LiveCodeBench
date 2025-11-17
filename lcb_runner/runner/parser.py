@@ -47,11 +47,22 @@ def get_args():
         help="whether to use CoT in code execution scenario",
     )
     
-    # --- ADDED RL FLAG HERE ---
+    # --- ADDED RL FLAGS HERE ---
     parser.add_argument(
         "--use_rl",
         action="store_true",
         help="If specified, use Reinforcement Learning for the self-repair scenario."
+    )
+    parser.add_argument(
+        "--unified",
+        action="store_true",
+        help="If specified, use unified pipeline: baseline + RL repair + round-robin repair (no leakage, fair comparison)."
+    )
+    parser.add_argument(
+        "--max_repair_attempts",
+        type=int,
+        default=5,
+        help="Maximum number of repair attempts (default: 5)"
     )
     
     # Synthetic test generation parameters
@@ -73,6 +84,12 @@ def get_args():
         default=0.5,
         help="Minimum confidence threshold for synthetic tests (default: 0.5)"
     )
+    parser.add_argument(
+        "--test_gen_model",
+        type=str,
+        default=None,
+        help="Model to use for synthetic test generation (stronger model recommended, e.g., gpt-4o or gemini-2.5-flash-preview-05-20). If not specified, uses --model for both test generation and repair."
+    )
 
     parser.add_argument(
         "--n", type=int, default=10, help="Number of samples to generate"
@@ -88,7 +105,7 @@ def get_args():
     )
     parser.add_argument("--top_p", type=float, default=0.95, help="Top p for sampling")
     parser.add_argument(
-        "--max_tokens", type=int, default=2000, help="Max tokens for sampling"
+        "--max_tokens", type=int, default=5000, help="Max tokens for sampling"
     )
     # ... (rest of the arguments remain the same)
     parser.add_argument(
@@ -119,7 +136,7 @@ def get_args():
         default=12,
         help="Number of processes to use for evaluation",
     )
-    parser.add_argument("--timeout", type=int, default=6, help="Timeout for evaluation")
+    parser.add_argument("--timeout", type=int, default=60, help="Timeout for code execution and validation (seconds)")
     parser.add_argument(
         "--openai_timeout", type=int, default=90, help="Timeout for requests to OpenAI"
     )

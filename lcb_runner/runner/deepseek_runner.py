@@ -19,7 +19,7 @@ class DeepSeekRunner(BaseRunner):
     def __init__(self, args, model):
         super().__init__(args, model)
         self.client_kwargs: dict[str | str] = {
-            "model": args.model,
+            "model": model.model_name,  # Use model parameter, not args.model
             "temperature": args.temperature,
             "max_tokens": args.max_tokens,
             "top_p": args.top_p,
@@ -33,7 +33,14 @@ class DeepSeekRunner(BaseRunner):
     def _run_single(self, prompt: list[dict[str, str]]) -> list[str]:
         assert isinstance(prompt, list)
 
-        def __run_single(counter):
+        # Log which model is being used for this API call
+        model_being_used = self.client_kwargs.get("model", "unknown")
+        import logging
+        import sys
+        logging.debug(f"DeepSeekRunner._run_single: Making API call with model={model_being_used}")
+        print(f"  [DeepSeek API Call] Using model: {model_being_used}", file=sys.stderr, flush=True)
+
+        def __run_single(counter, retry_count=0, max_retries=5):
             try:
                 response = self.client.chat.completions.create(
                     messages=prompt,
@@ -51,11 +58,15 @@ class DeepSeekRunner(BaseRunner):
                 openai.InternalServerError,
                 openai.APIConnectionError,
             ) as e:
-                print("Exception: ", repr(e))
+                if retry_count >= max_retries:
+                    print(f"Max retries ({max_retries}) reached. Giving up.")
+                    return ""  # Return empty string instead of infinite loop
+                
+                print(f"Exception: {repr(e)} (Retry {retry_count + 1}/{max_retries})")
                 print("Sleeping for 30 seconds...")
                 print("Consider reducing the number of parallel processes.")
                 sleep(30)
-                return DeepSeekRunner._run_single(prompt)
+                return __run_single(counter, retry_count + 1, max_retries)
             except Exception as e:
                 print(f"Failed to run the model for {prompt}!")
                 print("Exception: ", repr(e))

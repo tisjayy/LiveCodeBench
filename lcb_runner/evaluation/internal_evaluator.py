@@ -15,6 +15,44 @@ import os
 
 from lcb_runner.evaluation.synthetic_test_generator import TestCase
 
+# Import string used by ground-truth evaluator - necessary for type hints and common imports
+IMPORT_STRING = """from string import *
+from re import *
+from datetime import *
+from collections import *
+from heapq import *
+from bisect import *
+from copy import *
+from math import *
+from random import *
+from statistics import *
+from itertools import *
+from functools import *
+from operator import *
+from io import *
+from sys import *
+from json import *
+from builtins import *
+from typing import *
+import string
+import re
+import datetime
+import collections
+import heapq
+import bisect
+import copy
+import math
+import random
+import statistics
+import itertools
+import functools
+import operator
+import io
+import sys
+import json
+sys.setrecursionlimit(50000)
+"""
+
 
 class InternalEvaluator:
     """
@@ -71,14 +109,13 @@ class InternalEvaluator:
                     "metadata": test_metadata
                 })
                 
-                # Debug logging - use original_index if available to show which test from generation phase
-                test_label = test_case.original_index if hasattr(test_case, 'original_index') and test_case.original_index is not None else idx
+                # Debug logging
                 if not passed:
-                    print(f"Test {test_label} FAILED - Input: {repr(str(test_case.input_val)[:50])}, Expected: {repr(test_case.expected_output)}, Actual: {repr(test_metadata.get('actual', 'N/A'))}")
+                    print(f"Test {idx} FAILED - Input: {repr(str(test_case.input_val)[:50])}, Expected: {repr(test_case.expected_output)}, Actual: {repr(test_metadata.get('actual', 'N/A'))}")
                     if 'error' in test_metadata:
                         print(f"  Error: {test_metadata['error']}")
                 else:
-                    print(f"Test {test_label} PASSED - Category: {test_case.category}")
+                    print(f"Test {idx} PASSED - Category: {test_case.category}")
                 
                 if test_metadata.get("timeout"):
                     metadata["timeouts"] += 1
@@ -103,6 +140,7 @@ class InternalEvaluator:
     def _evaluate_stdin(self, code: str, test: TestCase) -> Tuple[bool, Dict[str, Any]]:
         """Evaluate stdin-based code against a test case."""
         import time
+        import ast
         
         try:
             # Check if code is empty or invalid
@@ -110,6 +148,16 @@ class InternalEvaluator:
                 return False, {
                     "error": "Code is empty or invalid",
                     "error_code": -5
+                }
+            
+            # CRITICAL: Validate code syntax before execution (prevents truncation issues)
+            try:
+                ast.parse(code)
+            except SyntaxError as e:
+                return False, {
+                    "error": f"Code has syntax error (possibly truncated): {str(e)[:100]}",
+                    "error_code": -1,
+                    "syntax_error": str(e)
                 }
             
             # Create a temporary Python file
@@ -157,7 +205,7 @@ class InternalEvaluator:
                         # Capture stderr for debugging
                         error_msg = stderr.strip() if stderr else "Unknown error"
                         return False, {
-                            "error": error_msg[:200],  # Truncate long errors
+                            "error": error_msg,  # Don't truncate - we need full error for debugging
                             "error_code": -4,
                             "execution_time": execution_time,
                             "input_used": input_data,
@@ -167,6 +215,11 @@ class InternalEvaluator:
                     # Normalize stdout: strip trailing spaces/newlines but preserve structure
                     actual_output = stdout.rstrip('\n\r ').strip()
                     expected_output = str(test.expected_output).strip()
+                    
+                    # Handle escaped newlines in expected output (common in test generation)
+                    # If expected has literal \\n, convert to real newlines for comparison
+                    if '\\n' in expected_output and '\n' not in expected_output:
+                        expected_output = expected_output.replace('\\n', '\n')
                     
                     # Compare outputs with normalization
                     passed = self._compare_outputs(actual_output, expected_output)
@@ -201,6 +254,7 @@ class InternalEvaluator:
         """Evaluate call-based code against a test case."""
         import time
         import re
+        import ast
         
         try:
             # Check if code is empty or invalid
@@ -208,6 +262,16 @@ class InternalEvaluator:
                 return False, {
                     "error": "Code is empty or invalid",
                     "error_code": -5
+                }
+            
+            # Validate code syntax before execution (prevents truncation issues)
+            try:
+                ast.parse(code)
+            except SyntaxError as e:
+                return False, {
+                    "error": f"Code has syntax error (possibly truncated): {str(e)[:100]}",
+                    "error_code": -1,
+                    "syntax_error": str(e)
                 }
             
             # Extract function/method name and check if it's inside a class
@@ -245,25 +309,35 @@ class InternalEvaluator:
                 # If function is inside a class, instantiate it first
                 if class_name:
                     test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
-import json
-
-input_data = json.loads('{input_json_str}')
+input_data = json.loads({repr(input_json_str)})
 obj = {class_name}()
-result = obj.{func_name}(*input_data) if isinstance(input_data, list) else obj.{func_name}(input_data)
+if isinstance(input_data, list):
+    result = obj.{func_name}(*input_data)
+elif isinstance(input_data, dict):
+    result = obj.{func_name}(**input_data)
+else:
+    result = obj.{func_name}(input_data)
 print(json.dumps(result))
 """
                 else:
                     test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
-import json
-
-input_data = json.loads('{input_json_str}')
-result = {func_name}(*input_data) if isinstance(input_data, list) else {func_name}(input_data)
+input_data = json.loads({repr(input_json_str)})
+if isinstance(input_data, list):
+    result = {func_name}(*input_data)
+elif isinstance(input_data, dict):
+    result = {func_name}(**input_data)
+else:
+    result = {func_name}(input_data)
 print(json.dumps(result))
 """
             elif isinstance(test.input_val, str):
@@ -274,11 +348,11 @@ print(json.dumps(result))
                     if isinstance(parsed, list):
                         if class_name:
                             test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
-import json
-
 input_data = json.loads({repr(test.input_val)})
 obj = {class_name}()
 result = obj.{func_name}(*input_data)
@@ -286,11 +360,11 @@ print(json.dumps(result))
 """
                         else:
                             test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
-import json
-
 input_data = json.loads({repr(test.input_val)})
 result = {func_name}(*input_data)
 print(json.dumps(result))
@@ -298,23 +372,35 @@ print(json.dumps(result))
                     else:
                         if class_name:
                             test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
-import json
 input_data = json.loads({repr(test.input_val)})
 obj = {class_name}()
-result = obj.{func_name}(input_data)
+if isinstance(input_data, list):
+    result = obj.{func_name}(*input_data)
+elif isinstance(input_data, dict):
+    result = obj.{func_name}(**input_data)
+else:
+    result = obj.{func_name}(input_data)
 print(json.dumps(result))
 """
                         else:
                             test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
-import json
 input_data = json.loads({repr(test.input_val)})
-result = {func_name}(input_data)
+if isinstance(input_data, list):
+    result = {func_name}(*input_data)
+elif isinstance(input_data, dict):
+    result = {func_name}(**input_data)
+else:
+    result = {func_name}(input_data)
 print(json.dumps(result))
 """
                 except json.JSONDecodeError:
@@ -327,6 +413,8 @@ print(json.dumps(result))
                 # Other types (int, float, etc.) - treat as single argument
                 if class_name:
                     test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
@@ -336,12 +424,24 @@ print(json.dumps(result))
 """
                 else:
                     test_wrapper = f"""
+{IMPORT_STRING}
+
 {code}
 
 # Test execution
 result = {func_name}({repr(test.input_val)})
 print(json.dumps(result))
 """
+            
+            # Validate test_wrapper before writing (optional sanity check)
+            try:
+                ast.parse(test_wrapper)
+            except SyntaxError as e:
+                return False, {
+                    "error": f"Generated test wrapper has syntax error: {str(e)[:100]}",
+                    "error_code": -1,
+                    "syntax_error": str(e)
+                }
             
             # Create temporary file and execute
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -365,7 +465,7 @@ print(json.dumps(result))
                         # Capture stderr for debugging
                         error_msg = stderr.strip() if stderr else "Unknown error"
                         return False, {
-                            "error": error_msg[:200],  # Truncate long errors
+                            "error": error_msg,  # Don't truncate - we need full error for debugging
                             "error_code": -4,
                             "execution_time": execution_time
                         }
@@ -424,13 +524,24 @@ print(json.dumps(result))
         if actual_str.lower() in ('true', 'false') and expected_str.lower() in ('true', 'false'):
             return actual_str.lower() == expected_str.lower()
         
-        # Try JSON comparison
+        # Try JSON comparison - handle cases where one is JSON-encoded and the other isn't
         try:
-            actual_json = json.loads(actual_str)
-            expected_json = json.loads(expected_str)
-            return actual_json == expected_json
-        except (json.JSONDecodeError, ValueError):
-            pass
+            # Try to parse both as JSON
+            actual_json = json.loads(actual_str) if isinstance(actual, str) else actual
+            expected_json = json.loads(expected_str) if isinstance(expected, str) else expected
+            
+            # If parsing succeeded, compare the parsed values
+            if actual_json == expected_json:
+                return True
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # If one fails to parse, try parsing just the expected (might be JSON-encoded)
+            try:
+                expected_json = json.loads(expected_str)
+                # Compare actual with the decoded expected
+                if actual == expected_json or actual_str == str(expected_json):
+                    return True
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
         
         # Try float comparison with tolerance
         try:
@@ -486,6 +597,7 @@ def compute_weighted_reward(
 ) -> float:
     """
     Compute reward from test results with optional confidence weighting.
+    Enhanced to give better signal for partial progress.
     
     Args:
         test_results: List of pass/fail results
@@ -493,12 +605,12 @@ def compute_weighted_reward(
         old_results: Previous test results for computing delta
         
     Returns:
-        Reward value (typically -0.5 to 1.0)
+        Reward value (typically -0.3 to 1.0)
     """
     if not test_results:
         return 0.0
     
-    # If all tests pass
+    # If all tests pass - BIG reward!
     if all(test_results):
         return 1.0
     
@@ -518,11 +630,16 @@ def compute_weighted_reward(
         
         improvement = current_score - old_score
         
-        if improvement > 0:
-            return improvement  # Reward for improvement
-        else:
-            return -0.5  # Penalty for no improvement or regression
+        if improvement > 0.1:  # Significant improvement
+            return min(0.8, improvement * 2)  # Amplify reward (up to 0.8)
+        elif improvement > 0:  # Small improvement
+            return improvement * 0.5  # Moderate reward
+        elif improvement > -0.1:  # Same or slight regression
+            return -0.1  # Small penalty (reduced from -0.5)
+        else:  # Significant regression
+            return -0.3  # Moderate penalty (reduced from -0.5)
     else:
-        # No baseline to compare, just return score
-        return current_score - 0.5  # Center around 0
+        # No baseline to compare, reward based on absolute performance
+        # Scale: 0→-0.3, 0.5→0.1, 1.0→0.7
+        return (current_score - 0.3)  # More generous than before (-0.5)
 

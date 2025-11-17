@@ -20,21 +20,21 @@ class OpenAIRunner(BaseRunner):
         super().__init__(args, model)
         if model.model_style == LMStyle.OpenAIReasonPreview:
             self.client_kwargs: dict[str | str] = {
-                "model": args.model,
+                "model": model.model_name,  # Use model parameter, not args.model
                 "max_completion_tokens": 25000,
             }
         elif model.model_style == LMStyle.OpenAIReason:
             assert (
-                "__" in args.model
-            ), f"Model {args.model} is not a valid OpenAI Reasoning model as we require reasoning effort in model name."
-            model, reasoning_effort = args.model.split("__")
+                "__" in model.model_name
+            ), f"Model {model.model_name} is not a valid OpenAI Reasoning model as we require reasoning effort in model name."
+            model_name, reasoning_effort = model.model_name.split("__")
             self.client_kwargs: dict[str | str] = {
-                "model": model,
+                "model": model_name,
                 "reasoning_effort": reasoning_effort,
             }
         else:
             self.client_kwargs: dict[str | str] = {
-                "model": args.model,
+                "model": model.model_name,  # Use model parameter, not args.model
                 "temperature": args.temperature,
                 "max_tokens": args.max_tokens,
                 "top_p": args.top_p,
@@ -45,12 +45,22 @@ class OpenAIRunner(BaseRunner):
                 # "stop": args.stop, --> stop is only used for base models currently
             }
 
-    def _run_single(self, prompt: list[dict[str, str]], n: int = 10) -> list[str]:
+    def _run_single(self, prompt: list[dict[str, str]], n: int = 1) -> list[str]:
         assert isinstance(prompt, list)
 
         if n == 0:
-            print("Max retries reached. Returning empty response.")
-            return []
+            print("Max retries (1) reached for OpenAI API. Giving up and returning empty response.")
+            return [""]  # Return list with empty string
+
+        # Log which model is being used for this API call
+        model_being_used = self.client_kwargs.get("model", "unknown")
+        import logging
+        logging.debug(f"OpenAIRunner._run_single: Making API call with model={model_being_used}")
+        
+        # Print to stderr to avoid interfering with progress bars
+        import sys
+        if n == 1:  # Only log on first attempt, not retries
+            print(f"  [API Call] Using model: {model_being_used}", file=sys.stderr, flush=True)
 
         try:
             response = OpenAIRunner.client.chat.completions.create(
@@ -67,7 +77,8 @@ class OpenAIRunner(BaseRunner):
             openai.InternalServerError,
             openai.APIConnectionError,
         ) as e:
-            print("Exception: ", repr(e))
+            retry_num = 2 - n  # Calculate current retry (1-indexed)
+            print(f"Exception: {repr(e)} (Retry {retry_num}/1)")
             print("Sleeping for 30 seconds...")
             print("Consider reducing the number of parallel processes.")
             sleep(30)
